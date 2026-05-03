@@ -85,7 +85,7 @@ class WahaApiClient:
             "Accept": "application/json"
         }
         if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+            headers["X-Api-Key"] = self.api_key
         return headers
 
     async def _make_request(
@@ -185,19 +185,40 @@ class WahaApiClient:
         Returns:
             bool: True if connection is successful
         """
-        try:
-            # Use the /api/version endpoint which is available in WAHA CORE
-            response = await self._make_request("GET", "api/version", timeout=10)
-            # Verify we get a valid response with version info
-            if isinstance(response, dict) and "version" in response:
-                _LOGGER.debug("WAHA connection test successful. Version: %s", response.get("version"))
-                return True
-            else:
-                _LOGGER.error("WAHA connection test failed: Invalid response format")
-                return False
-        except Exception as exc:
-            _LOGGER.error("WAHA connection test failed: %s\n%s", exc, traceback.format_exc())
-            return False
+        endpoints = ["api/server/version", "api/version"]
+
+        for endpoint in endpoints:
+            try:
+                response = await self._make_request("GET", endpoint, timeout=10)
+                if isinstance(response, dict) and "version" in response:
+                    _LOGGER.debug(
+                        "WAHA connection test successful via %s. Version: %s",
+                        endpoint,
+                        response.get("version"),
+                    )
+                    return True
+                _LOGGER.warning(
+                    "WAHA connection test got unexpected response via %s: %s",
+                    endpoint,
+                    type(response).__name__,
+                )
+            except WahaApiError as exc:
+                _LOGGER.warning(
+                    "WAHA connection test failed via %s: %s (status: %s)",
+                    endpoint,
+                    exc,
+                    exc.status_code,
+                )
+            except Exception as exc:
+                _LOGGER.warning(
+                    "WAHA connection test error via %s: %s\n%s",
+                    endpoint,
+                    exc,
+                    traceback.format_exc(),
+                )
+
+        _LOGGER.error("WAHA connection test failed for all known version endpoints")
+        return False
 
     async def send_message(
         self, 

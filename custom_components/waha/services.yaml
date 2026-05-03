@@ -15,4 +15,28 @@ send_message:
       required: true
       selector:
         text:
-          multiline: true 
+          multiline: true
+
+start_typing:
+  name: Start Typing Indicator
+  description: Send a typing indicator to a WhatsApp chat
+  fields:
+    phone_number:
+      name: Phone Number
+      description: Phone number in international format (e.g., +972541234567)
+      required: true
+      selector:
+        text:
+          type: tel
+
+stop_typing:
+  name: Stop Typing Indicator
+  description: Stop sending a typing indicator to a WhatsApp chat
+  fields:
+    phone_number:
+      name: Phone Number
+      description: Phone number in international format (e.g., +972541234567)
+      required: true
+      selector:
+        text:
+          type: tel 

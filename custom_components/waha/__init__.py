@@ -32,8 +32,24 @@ SEND_MESSAGE_SERVICE_SCHEMA = vol.Schema(
     extra=vol.ALLOW_EXTRA,
 )
 
+START_TYPING_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Required("phone_number"): cv.string,
+    },
+    extra=vol.ALLOW_EXTRA,
+)
+
+STOP_TYPING_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Required("phone_number"): cv.string,
+    },
+    extra=vol.ALLOW_EXTRA,
+)
+
 SERVICE_SCHEMAS = {
     "send_message": SEND_MESSAGE_SERVICE_SCHEMA,
+    "start_typing": START_TYPING_SERVICE_SCHEMA,
+    "stop_typing": STOP_TYPING_SERVICE_SCHEMA,
 }
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -94,6 +110,64 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             schema=SEND_MESSAGE_SERVICE_SCHEMA,
         )
         _LOGGER.info("WAHA: Service registered: waha.send_message")
+    
+    # Register start_typing service
+    async def handle_start_typing(call: ServiceCall) -> None:
+        """Handle the start_typing service call."""
+        phone_number = call.data.get("phone_number")
+        
+        if not phone_number:
+            raise HomeAssistantError("phone_number is required")
+        
+        _LOGGER.info("WAHA: Starting typing indicator for %s", phone_number)
+        
+        try:
+            result = await api_client.start_typing(chat_id=phone_number)
+            if result:
+                _LOGGER.debug("WAHA: Typing indicator started for %s", phone_number)
+            else:
+                _LOGGER.error("WAHA: Failed to start typing indicator for %s", phone_number)
+        except Exception as err:
+            _LOGGER.error("WAHA: Error starting typing indicator for %s: %s", phone_number, err)
+            raise HomeAssistantError(f"Failed to start typing: {err}") from err
+    
+    if not hass.services.has_service(DOMAIN, "start_typing"):
+        hass.services.async_register(
+            DOMAIN,
+            "start_typing",
+            handle_start_typing,
+            schema=START_TYPING_SERVICE_SCHEMA,
+        )
+        _LOGGER.info("WAHA: Service registered: waha.start_typing")
+    
+    # Register stop_typing service
+    async def handle_stop_typing(call: ServiceCall) -> None:
+        """Handle the stop_typing service call."""
+        phone_number = call.data.get("phone_number")
+        
+        if not phone_number:
+            raise HomeAssistantError("phone_number is required")
+        
+        _LOGGER.info("WAHA: Stopping typing indicator for %s", phone_number)
+        
+        try:
+            result = await api_client.stop_typing(chat_id=phone_number)
+            if result:
+                _LOGGER.debug("WAHA: Typing indicator stopped for %s", phone_number)
+            else:
+                _LOGGER.error("WAHA: Failed to stop typing indicator for %s", phone_number)
+        except Exception as err:
+            _LOGGER.error("WAHA: Error stopping typing indicator for %s: %s", phone_number, err)
+            raise HomeAssistantError(f"Failed to stop typing: {err}") from err
+    
+    if not hass.services.has_service(DOMAIN, "stop_typing"):
+        hass.services.async_register(
+            DOMAIN,
+            "stop_typing",
+            handle_stop_typing,
+            schema=STOP_TYPING_SERVICE_SCHEMA,
+        )
+        _LOGGER.info("WAHA: Service registered: waha.stop_typing")
     
     # Set up platforms  
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -164,10 +238,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Remove from hass.data
         hass.data[DOMAIN].pop(entry.entry_id, None)
         
-        # Remove service if this was the last entry
+        # Remove services if this was the last entry
         if not hass.data[DOMAIN]:
             if hass.services.has_service(DOMAIN, "send_message"):
                 hass.services.async_remove(DOMAIN, "send_message")
                 _LOGGER.info("WAHA: Removed send_message service")
+            if hass.services.has_service(DOMAIN, "start_typing"):
+                hass.services.async_remove(DOMAIN, "start_typing")
+                _LOGGER.info("WAHA: Removed start_typing service")
+            if hass.services.has_service(DOMAIN, "stop_typing"):
+                hass.services.async_remove(DOMAIN, "stop_typing")
+                _LOGGER.info("WAHA: Removed stop_typing service")
 
     return unload_ok 

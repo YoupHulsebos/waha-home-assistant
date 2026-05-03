@@ -471,4 +471,66 @@ class WahaApiClient:
                 "Unexpected error while ensuring session %s is active: %s\n%s",
                 self.session_name, exc, traceback.format_exc()
             )
+            return False
+
+    async def start_typing(self, chat_id: str) -> bool:
+        """Send a typing indicator to a chat.
+        
+        Args:
+            chat_id: WhatsApp chat ID (phone number with @c.us suffix or phone number)
+        
+        Returns:
+            bool: True if typing indicator was sent successfully
+        """
+        # Ensure chat_id has proper format for WhatsApp
+        if not chat_id.endswith("@c.us") and not chat_id.endswith("@g.us"):
+            # If it's just a phone number, format it properly
+            clean_number = chat_id.lstrip('+').replace(' ', '').replace('-', '')
+            chat_id = f"{clean_number}@c.us"
+        
+        payload = {
+            "session": self.session_name,
+            "chatId": chat_id,
+        }
+        try:
+            await self._make_request("POST", "api/startTyping", data=payload, timeout=10)
+            _LOGGER.debug("Typing indicator started for %s", chat_id)
+            return True
+        except WahaApiError as exc:
+            _LOGGER.error("WAHA API error starting typing for %s: %s (status: %s)", 
+                         chat_id, exc, exc.status_code)
+            return False
+        except Exception as exc:
+            _LOGGER.error("Error starting typing for %s: %s", chat_id, exc)
+            return False
+
+    async def stop_typing(self, chat_id: str) -> bool:
+        """Stop sending a typing indicator to a chat.
+        
+        Args:
+            chat_id: WhatsApp chat ID (phone number with @c.us suffix or phone number)
+        
+        Returns:
+            bool: True if typing indicator was stopped successfully
+        """
+        # Ensure chat_id has proper format for WhatsApp
+        if not chat_id.endswith("@c.us") and not chat_id.endswith("@g.us"):
+            # If it's just a phone number, format it properly
+            clean_number = chat_id.lstrip('+').replace(' ', '').replace('-', '')
+            chat_id = f"{clean_number}@c.us"
+        
+        payload = {
+            "session": self.session_name,
+            "chatId": chat_id,
+        }
+        try:
+            await self._make_request("POST", "api/stopTyping", data=payload, timeout=10)
+            _LOGGER.debug("Typing indicator stopped for %s", chat_id)
+            return True
+        except WahaApiError as exc:
+            _LOGGER.error("WAHA API error stopping typing for %s: %s (status: %s)", 
+                         chat_id, exc, exc.status_code)
+            return False
+        except Exception as exc:
+            _LOGGER.error("Error stopping typing for %s: %s", chat_id, exc)
             return False 

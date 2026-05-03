@@ -11,6 +11,7 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import config_entry_oauth2_flow
 import traceback
 import aiohttp
+import json
 
 from .const import (
     DOMAIN,
@@ -92,29 +93,64 @@ class WahaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def _test_connection(self, data: Dict[str, Any]) -> bool:
         """Test connection to WAHA instance."""
-        url = f"{data[CONF_BASE_URL]}/api/version"
         headers = {"accept": "application/json"}
         
         if api_key := data.get(CONF_API_KEY):
-            headers["Authorization"] = f"Bearer {api_key}"
+            headers["X-Api-Key"] = api_key
+            
+        endpoints = ["api/server/version", "api/version"]
 
         try:
+            timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=10) as resp:
-                    if resp.status == 200:
-                        response_data = await resp.json()
-                        if "version" in response_data:
-                            _LOGGER.debug("WAHA connection test successful. Version: %s", response_data.get("version"))
+                for endpoint in endpoints:
+                    url = f"{data[CONF_BASE_URL]}/{endpoint}"
+                    async with session.get(url, headers=headers, timeout=timeout) as resp:
+                        response_text = await resp.text()
+
+                        if resp.status != 200:
+                            _LOGGER.warning(
+                                "WAHA server returned status %s for %s: %s",
+                                resp.status,
+                                endpoint,
+                                response_text,
+                            )
+                            continue
+
+                        response_data: Optional[Dict[str, Any]] = None
+                        try:
+                            response_data = json.loads(response_text)
+                        except json.JSONDecodeError:
+                            _LOGGER.warning(
+                                "WAHA server returned non-JSON payload for %s (content-type: %s)",
+                                endpoint,
+                                resp.headers.get("Content-Type", "unknown"),
+                            )
+                            continue
+
+                        if isinstance(response_data, dict) and "version" in response_data:
+                            _LOGGER.debug(
+                                "WAHA connection test successful via %s. Version: %s",
+                                endpoint,
+                                response_data.get("version"),
+                            )
                             return True
-                    _LOGGER.error(
-                        "WAHA server returned status %s: %s",
-                        resp.status,
-                        await resp.text(),
-                    )
+
+                        _LOGGER.warning(
+                            "WAHA response for %s does not contain version field: %s",
+                            endpoint,
+                            response_data,
+                        )
         except aiohttp.ClientError as err:
             _LOGGER.error("Failed to connect to WAHA server: %s", err)
+        except TimeoutError as err:
+            _LOGGER.error("Connection to WAHA server timed out: %r", err)
         except Exception as err:  # pylint: disable=broad-except
-            _LOGGER.error("Unexpected error testing WAHA connection: %s", err)
+            _LOGGER.error(
+                "Unexpected error testing WAHA connection: %r\n%s",
+                err,
+                traceback.format_exc(),
+            )
         return False
 
     @staticmethod

@@ -246,7 +246,10 @@ class WahaApiClient:
             clean_number = chat_id.lstrip('+').replace(' ', '').replace('-', '')
             chat_id = f"{clean_number}@c.us"
         
+        session_recovery_attempted = False
+        
         async def _send() -> bool:
+            nonlocal session_recovery_attempted
             payload = {
                 "session": self.session_name,
                 "chatId": chat_id,
@@ -258,9 +261,31 @@ class WahaApiClient:
                 _LOGGER.info("Message sent successfully to %s, message ID: %s", chat_id, response.get("id", "unknown"))
                 return True
             except WahaApiError as exc:
-                _LOGGER.error("WAHA API error sending message to %s: %s (status: %s, response: %s)", 
-                             chat_id, exc, exc.status_code, exc.response_text)
-                raise Exception(f"Failed to send message to {chat_id}: {exc}")
+                # If this is the first attempt and we haven't tried recovery yet,
+                # try to recover the session (in case it was stopped after Docker restart)
+                if not session_recovery_attempted:
+                    session_recovery_attempted = True
+                    _LOGGER.warning(
+                        "WAHA API error sending message to %s: %s (status: %s). "
+                        "Attempting session recovery...",
+                        chat_id, exc, exc.status_code
+                    )
+                    
+                    if await self.ensure_session_active():
+                        _LOGGER.info("Session recovered successfully. Retrying message send...")
+                        # Retry the send by re-raising to let async_retry handle it
+                        raise Exception(f"Session was recovered, retrying: {exc}")
+                    else:
+                        _LOGGER.error(
+                            "Failed to recover session. The session may require manual intervention "
+                            "(e.g., QR code scan or authentication)."
+                        )
+                        raise Exception(f"Failed to recover session: {exc}")
+                else:
+                    # Already attempted recovery, log and fail
+                    _LOGGER.error("WAHA API error sending message to %s (after recovery attempt): %s (status: %s, response: %s)", 
+                                 chat_id, exc, exc.status_code, exc.response_text)
+                    raise Exception(f"Failed to send message to {chat_id}: {exc}")
 
         try:
             return await async_retry(_send, attempts=retry_attempts, delay=retry_delay)
@@ -319,4 +344,131 @@ class WahaApiClient:
             return True
         except WahaApiError as exc:
             _LOGGER.error("Failed to logout: %s", exc)
+            return False
+
+    async def start_session(self) -> bool:
+        """Start the WhatsApp session.
+        
+        Returns:
+            bool: True if session start was successful
+        """
+        try:
+            endpoint = f"api/sessions/{self.session_name}/start"
+            response = await self._make_request("POST", endpoint)
+            _LOGGER.info("Session started successfully: %s", self.session_name)
+            return True
+        except WahaApiError as exc:
+            _LOGGER.error("Failed to start session %s: %s (status: %s)", 
+                         self.session_name, exc, exc.status_code)
+            return False
+
+    async def wait_for_session_working(
+        self, 
+        timeout: int = 120, 
+        poll_interval: float = 3.0
+    ) -> bool:
+        """Wait for the session to reach WORKING status.
+        
+        Args:
+            timeout: Maximum time to wait in seconds
+            poll_interval: How often to check status in seconds
+        
+        Returns:
+            bool: True if session reached WORKING status, False if timeout or unrecoverable status
+        """
+        start_time = time.time()
+        
+        while True:
+            elapsed = time.time() - start_time
+            
+            if elapsed > timeout:
+                _LOGGER.error(
+                    "Timeout waiting for session %s to reach WORKING status (waited %d seconds)",
+                    self.session_name, timeout
+                )
+                return False
+            
+            try:
+                status = await self.get_session_status()
+                
+                if status == "WORKING":
+                    _LOGGER.info("Session %s is now WORKING", self.session_name)
+                    return True
+                elif status == "STARTING":
+                    _LOGGER.debug(
+                        "Session %s is starting (elapsed: %.1f seconds)",
+                        self.session_name, elapsed
+                    )
+                    await asyncio.sleep(poll_interval)
+                elif status in ["SCAN_QR_CODE", "FAILED"]:
+                    _LOGGER.error(
+                        "Session %s is in unrecoverable state: %s. "
+                        "Manual intervention required (scan QR code or check logs).",
+                        self.session_name, status
+                    )
+                    return False
+                else:
+                    _LOGGER.warning(
+                        "Session %s has unexpected status: %s (elapsed: %.1f seconds)",
+                        self.session_name, status, elapsed
+                    )
+                    await asyncio.sleep(poll_interval)
+                    
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Error checking session status for %s: %s (elapsed: %.1f seconds). Retrying...",
+                    self.session_name, exc, elapsed
+                )
+                await asyncio.sleep(poll_interval)
+
+    async def ensure_session_active(self) -> bool:
+        """Ensure the session is in WORKING status.
+        
+        If the session is STOPPED, start it and wait for WORKING status.
+        If the session is STARTING, wait for WORKING status.
+        If the session is in SCAN_QR_CODE or FAILED, return False (manual intervention needed).
+        
+        Returns:
+            bool: True if session is (or was recovered to) WORKING status, False otherwise
+        """
+        try:
+            status = await self.get_session_status()
+            
+            if status == "WORKING":
+                _LOGGER.debug("Session %s is already WORKING", self.session_name)
+                return True
+            
+            elif status == "STOPPED":
+                _LOGGER.info("Session %s is STOPPED. Attempting to start...", self.session_name)
+                if await self.start_session():
+                    _LOGGER.info("Session %s started. Waiting for WORKING status...", self.session_name)
+                    return await self.wait_for_session_working()
+                else:
+                    _LOGGER.error("Failed to start session %s", self.session_name)
+                    return False
+            
+            elif status == "STARTING":
+                _LOGGER.info("Session %s is STARTING. Waiting for WORKING status...", self.session_name)
+                return await self.wait_for_session_working()
+            
+            elif status in ["SCAN_QR_CODE", "FAILED"]:
+                _LOGGER.error(
+                    "Session %s is in unrecoverable state: %s. "
+                    "Manual intervention required (scan QR code or check server logs).",
+                    self.session_name, status
+                )
+                return False
+            
+            else:
+                _LOGGER.warning(
+                    "Session %s has unknown status: %s. Attempting to wait for WORKING...",
+                    self.session_name, status
+                )
+                return await self.wait_for_session_working(timeout=10)
+                
+        except Exception as exc:
+            _LOGGER.error(
+                "Unexpected error while ensuring session %s is active: %s\n%s",
+                self.session_name, exc, traceback.format_exc()
+            )
             return False 

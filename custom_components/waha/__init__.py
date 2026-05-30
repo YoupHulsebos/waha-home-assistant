@@ -46,6 +46,16 @@ STOP_TYPING_SERVICE_SCHEMA = vol.Schema(
     extra=vol.ALLOW_EXTRA,
 )
 
+SEND_LOCATION_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Required("phone_number"): cv.string,
+        vol.Required("latitude"): vol.Coerce(float),
+        vol.Required("longitude"): vol.Coerce(float),
+        vol.Required("title"): cv.string,
+    },
+    extra=vol.ALLOW_EXTRA,
+)
+
 SERVICE_SCHEMAS = {
     "send_message": SEND_MESSAGE_SERVICE_SCHEMA,
     "start_typing": START_TYPING_SERVICE_SCHEMA,
@@ -168,7 +178,49 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             schema=STOP_TYPING_SERVICE_SCHEMA,
         )
         _LOGGER.info("WAHA: Service registered: waha.stop_typing")
-    
+
+    # Register send_location service
+    async def handle_send_location(call: ServiceCall) -> None:
+        """Handle the send_location service call."""
+        phone_number = call.data.get("phone_number")
+        latitude = call.data.get("latitude")
+        longitude = call.data.get("longitude")
+        title = call.data.get("title")
+
+        if not phone_number:
+            raise HomeAssistantError("phone_number is required")
+
+        _LOGGER.info(
+            "WAHA: Sending location to %s: %s, %s (%s)",
+            phone_number, latitude, longitude, title,
+        )
+
+        try:
+            result = await api_client.send_location(
+                chat_id=phone_number,
+                latitude=latitude,
+                longitude=longitude,
+                title=title,
+            )
+            if result:
+                _LOGGER.info("WAHA: Location sent successfully to %s", phone_number)
+            else:
+                raise HomeAssistantError(f"Failed to send location to {phone_number}")
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            _LOGGER.error("WAHA: Error sending location to %s: %s", phone_number, err)
+            raise HomeAssistantError(f"Failed to send location: {err}") from err
+
+    if not hass.services.has_service(DOMAIN, "send_location"):
+        hass.services.async_register(
+            DOMAIN,
+            "send_location",
+            handle_send_location,
+            schema=SEND_LOCATION_SERVICE_SCHEMA,
+        )
+        _LOGGER.info("WAHA: Service registered: waha.send_location")
+
     # Set up platforms  
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     
@@ -249,5 +301,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if hass.services.has_service(DOMAIN, "stop_typing"):
                 hass.services.async_remove(DOMAIN, "stop_typing")
                 _LOGGER.info("WAHA: Removed stop_typing service")
+            if hass.services.has_service(DOMAIN, "send_location"):
+                hass.services.async_remove(DOMAIN, "send_location")
+                _LOGGER.info("WAHA: Removed send_location service")
 
     return unload_ok 

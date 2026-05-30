@@ -293,7 +293,49 @@ class WahaApiClient:
             _LOGGER.error("Error sending message to %s: %s", chat_id, exc)
             return False
 
+    async def send_location(
+        self,
+        chat_id: str,
+        latitude: float,
+        longitude: float,
+        title: str,
+    ) -> bool:
+        """Send a WhatsApp location message.
 
+        Args:
+            chat_id: WhatsApp chat ID (phone number with @c.us suffix or phone number)
+            latitude: Latitude of the location
+            longitude: Longitude of the location
+            title: Title/name of the location
+
+        Returns:
+            bool: True if message was sent successfully
+        """
+        await self._wait_for_rate_limit()
+
+        if not chat_id.endswith("@c.us") and not chat_id.endswith("@g.us"):
+            clean_number = chat_id.lstrip("+").replace(" ", "").replace("-", "")
+            chat_id = f"{clean_number}@c.us"
+
+        payload = {
+            "session": self.session_name,
+            "chatId": chat_id,
+            "latitude": latitude,
+            "longitude": longitude,
+            "title": title,
+        }
+
+        try:
+            response = await self._make_request("POST", "api/sendLocation", data=payload, timeout=15)
+            _LOGGER.info(
+                "Location sent successfully to %s, message ID: %s",
+                chat_id,
+                response.get("id", "unknown"),
+            )
+            return True
+        except Exception as exc:
+            _LOGGER.error("Error sending location to %s: %s", chat_id, exc)
+            return False
 
     async def get_qr_code(self) -> Optional[str]:
         """Get the QR code for WhatsApp Web authentication.

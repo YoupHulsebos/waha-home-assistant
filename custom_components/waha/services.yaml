@@ -39,4 +39,42 @@ stop_typing:
       required: true
       selector:
         text:
-          type: tel 
+          type: tel
+
+send_location:
+  name: Send WhatsApp Location
+  description: Send a location message via WAHA
+  fields:
+    phone_number:
+      name: Phone Number
+      description: Phone number in international format (e.g., +972541234567) or select from configured numbers
+      required: true
+      selector:
+        text:
+          type: tel
+    latitude:
+      name: Latitude
+      description: Latitude of the location (e.g., 52.3676)
+      required: true
+      selector:
+        number:
+          min: -90
+          max: 90
+          step: 0.000001
+          mode: box
+    longitude:
+      name: Longitude
+      description: Longitude of the location (e.g., 4.9041)
+      required: true
+      selector:
+        number:
+          min: -180
+          max: 180
+          step: 0.000001
+          mode: box
+    title:
+      name: Title
+      description: Name or description of the location (e.g., "Our office")
+      required: true
+      selector:
+        text: 

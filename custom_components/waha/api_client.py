@@ -65,6 +65,7 @@ class WahaApiClient:
         self.rate_limit = rate_limit
         self.message_timestamps: deque = deque(maxlen=rate_limit)
         self._rate_limit_lock = asyncio.Lock()
+        self._session_recovery_lock = asyncio.Lock()
 
     async def _get_session(self) -> ClientSession:
         """Get or create an aiohttp ClientSession."""
@@ -94,7 +95,9 @@ class WahaApiClient:
         endpoint: str, 
         data: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None
+        timeout: Optional[int] = None,
+        retry_attempts: int = 3,
+        retry_delay: float = 1.0,
     ) -> Any:
         """Make an API request.
         
@@ -104,6 +107,8 @@ class WahaApiClient:
             data: Request body data
             params: URL parameters
             timeout: Request timeout in seconds
+            retry_attempts: Number of retry attempts for transient failures
+            retry_delay: Delay between retries in seconds
             
         Returns:
             Any: Response data
@@ -117,6 +122,8 @@ class WahaApiClient:
         # Remove any leading slashes but keep the 'api/' prefix
         endpoint = endpoint.lstrip('/')
         url = urljoin(self.base_url + '/', endpoint)
+        session_recovery_attempted = False
+        skip_session_recovery = endpoint.startswith("api/sessions")
         
         session = await self._get_session()
         
@@ -125,41 +132,89 @@ class WahaApiClient:
         else:
             timeout_obj = self.timeout
 
-        try:
-            async with session.request(
-                method=method,
-                url=url,
-                json=data,
-                params=params,
-                headers=self._get_headers(),
-                timeout=timeout_obj
-            ) as resp:
-                if resp.status == 401:
-                    raise WahaAuthenticationError("Authentication failed", resp.status)
-                elif resp.status == 429:
-                    raise WahaRateLimitError("Rate limit exceeded", resp.status)
-                elif resp.status not in [200, 201]:
-                    text = await resp.text()
-                    raise WahaApiError(
-                        f"API request failed: {resp.status}",
-                        resp.status,
-                        text
-                    )
-                
-                try:
-                    return await resp.json()
-                except json.JSONDecodeError as exc:
-                    text = await resp.text()
-                    raise WahaApiError(
-                        f"Invalid JSON response: {exc}",
-                        resp.status,
-                        text
-                    )
-                    
-        except asyncio.TimeoutError as exc:
-            raise WahaConnectionError(f"Request timed out: {exc}")
-        except aiohttp.ClientError as exc:
-            raise WahaConnectionError(f"Connection error: {exc}")
+        async def _request() -> Any:
+            try:
+                async with session.request(
+                    method=method,
+                    url=url,
+                    json=data,
+                    params=params,
+                    headers=self._get_headers(),
+                    timeout=timeout_obj
+                ) as resp:
+                    if resp.status == 401:
+                        raise WahaAuthenticationError("Authentication failed", resp.status)
+                    elif resp.status == 429:
+                        raise WahaRateLimitError("Rate limit exceeded", resp.status)
+                    elif 500 <= resp.status < 600:
+                        text = await resp.text()
+                        raise WahaConnectionError(
+                            f"Server error: {resp.status}",
+                            resp.status,
+                            text,
+                        )
+                    elif resp.status not in [200, 201]:
+                        text = await resp.text()
+                        raise WahaApiError(
+                            f"API request failed: {resp.status}",
+                            resp.status,
+                            text
+                        )
+
+                    try:
+                        return await resp.json()
+                    except json.JSONDecodeError as exc:
+                        text = await resp.text()
+                        raise WahaApiError(
+                            f"Invalid JSON response: {exc}",
+                            resp.status,
+                            text
+                        )
+
+            except asyncio.TimeoutError as exc:
+                raise WahaConnectionError(f"Request timed out: {exc}")
+            except aiohttp.ClientError as exc:
+                raise WahaConnectionError(f"Connection error: {exc}")
+
+        async def _request_with_recovery() -> Any:
+            nonlocal session_recovery_attempted
+            try:
+                return await _request()
+            except WahaApiError as exc:
+                if session_recovery_attempted or skip_session_recovery:
+                    raise
+
+                session_recovery_attempted = True
+                _LOGGER.warning(
+                    "WAHA API error on %s %s: %s (status: %s). Attempting session recovery...",
+                    method,
+                    endpoint,
+                    exc,
+                    exc.status_code,
+                )
+
+                async with self._session_recovery_lock:
+                    if not await self.ensure_session_active():
+                        _LOGGER.error(
+                            "Failed to recover session after error on %s %s. "
+                            "Manual intervention may be required.",
+                            method,
+                            endpoint,
+                        )
+                        raise
+
+                _LOGGER.info("Session recovered successfully. Retrying request %s %s...", method, endpoint)
+                # Convert successful recovery into a retryable error for async_retry.
+                raise WahaConnectionError(
+                    f"Session recovered; retrying request {method} {endpoint}"
+                )
+
+        return await async_retry(
+            _request_with_recovery,
+            attempts=retry_attempts,
+            delay=retry_delay,
+            exceptions=(WahaConnectionError, WahaRateLimitError),
+        )
 
     async def _wait_for_rate_limit(self) -> None:
         """Wait if necessary to respect the rate limit."""
@@ -245,50 +300,34 @@ class WahaApiClient:
             # If it's just a phone number, format it properly
             clean_number = chat_id.lstrip('+').replace(' ', '').replace('-', '')
             chat_id = f"{clean_number}@c.us"
-        
-        session_recovery_attempted = False
-        
-        async def _send() -> bool:
-            nonlocal session_recovery_attempted
-            payload = {
-                "session": self.session_name,
-                "chatId": chat_id,
-                "text": message,
-            }
-            try:
-                # Use the correct WAHA endpoint format: /api/sendText
-                response = await self._make_request("POST", "api/sendText", data=payload, timeout=15)
-                _LOGGER.info("Message sent successfully to %s, message ID: %s", chat_id, response.get("id", "unknown"))
-                return True
-            except WahaApiError as exc:
-                # If this is the first attempt and we haven't tried recovery yet,
-                # try to recover the session (in case it was stopped after Docker restart)
-                if not session_recovery_attempted:
-                    session_recovery_attempted = True
-                    _LOGGER.warning(
-                        "WAHA API error sending message to %s: %s (status: %s). "
-                        "Attempting session recovery...",
-                        chat_id, exc, exc.status_code
-                    )
-                    
-                    if await self.ensure_session_active():
-                        _LOGGER.info("Session recovered successfully. Retrying message send...")
-                        # Retry the send by re-raising to let async_retry handle it
-                        raise Exception(f"Session was recovered, retrying: {exc}")
-                    else:
-                        _LOGGER.error(
-                            "Failed to recover session. The session may require manual intervention "
-                            "(e.g., QR code scan or authentication)."
-                        )
-                        raise Exception(f"Failed to recover session: {exc}")
-                else:
-                    # Already attempted recovery, log and fail
-                    _LOGGER.error("WAHA API error sending message to %s (after recovery attempt): %s (status: %s, response: %s)", 
-                                 chat_id, exc, exc.status_code, exc.response_text)
-                    raise Exception(f"Failed to send message to {chat_id}: {exc}")
+
+        payload = {
+            "session": self.session_name,
+            "chatId": chat_id,
+            "text": message,
+        }
 
         try:
-            return await async_retry(_send, attempts=retry_attempts, delay=retry_delay)
+            # Use the correct WAHA endpoint format: /api/sendText
+            response = await self._make_request(
+                "POST",
+                "api/sendText",
+                data=payload,
+                timeout=15,
+                retry_attempts=retry_attempts,
+                retry_delay=retry_delay,
+            )
+            _LOGGER.info("Message sent successfully to %s, message ID: %s", chat_id, response.get("id", "unknown"))
+            return True
+        except WahaApiError as exc:
+            _LOGGER.error(
+                "WAHA API error sending message to %s: %s (status: %s, response: %s)",
+                chat_id,
+                exc,
+                exc.status_code,
+                exc.response_text,
+            )
+            return False
         except Exception as exc:
             _LOGGER.error("Error sending message to %s: %s", chat_id, exc)
             return False
@@ -388,6 +427,22 @@ class WahaApiClient:
             _LOGGER.error("Failed to logout: %s", exc)
             return False
 
+    async def stop_session(self) -> bool:
+        """Stop the WhatsApp session.
+
+        Returns:
+            bool: True if session stop was successful
+        """
+        try:
+            endpoint = f"api/sessions/{self.session_name}/stop"
+            await self._make_request("POST", endpoint)
+            _LOGGER.info("Session stopped successfully: %s", self.session_name)
+            return True
+        except WahaApiError as exc:
+            _LOGGER.error("Failed to stop session %s: %s (status: %s)",
+                         self.session_name, exc, exc.status_code)
+            return False
+
     async def start_session(self) -> bool:
         """Start the WhatsApp session.
         
@@ -395,8 +450,14 @@ class WahaApiClient:
             bool: True if session start was successful
         """
         try:
+            if not await self.stop_session():
+                _LOGGER.warning(
+                    "Could not stop session %s before start; continuing anyway",
+                    self.session_name,
+                )
+
             endpoint = f"api/sessions/{self.session_name}/start"
-            response = await self._make_request("POST", endpoint)
+            await self._make_request("POST", endpoint)
             _LOGGER.info("Session started successfully: %s", self.session_name)
             return True
         except WahaApiError as exc:

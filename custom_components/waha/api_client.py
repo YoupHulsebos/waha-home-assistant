@@ -146,10 +146,6 @@ class WahaApiClient:
                         text
                     )
                 
-                content_length = resp.headers.get("Content-Length")
-                if content_length is None:
-                    return {}
-                
                 try:
                     return await resp.json()
                 except json.JSONDecodeError as exc:
